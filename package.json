@@ -1,0 +1,8 @@
+{
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.13.14",
+    "@types/react": "^19.0.12",
+    "@types/react-native": "^0.72.8"
+  }
+}

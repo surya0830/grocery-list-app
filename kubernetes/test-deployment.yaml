@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grocery-app-test
+  labels:
+    app: grocery-app
+    environment: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grocery-app
+      environment: test
+  template:
+    metadata:
+      labels:
+        app: grocery-app
+        environment: test
+    spec:
+      containers:
+      - name: grocery-app-test
+        image: ${var.container_registry}/grocery-app:test
+        env:
+        - name: NODE_ENV
+          value: "test"
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: azure-storage-secret
+              key: connection-string
+        command: ["npm"]
+        args: ["test"]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-storage-secret
+type: Opaque
+data:
+  connection-string: ${base64encode(azurerm_storage_account.grocery_storage.primary_connection_string)} 
