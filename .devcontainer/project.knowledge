@@ -1,0 +1,6 @@
+# Grocery App Knowledge Base
+- **Frontend**: React Native (mobile), Next.js (web)
+- **Backend**: Azure Functions, Cosmos DB
+- **AI**: GPT-4 for recipes, Azure Cognitive Services for expiry tracking
+- **Auth**: Azure AD B2C
+- **Deployment**: AKS, Terraform, Azure DevOps
