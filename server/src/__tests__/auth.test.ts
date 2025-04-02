@@ -2,7 +2,7 @@ import request from 'supertest';
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import app from '../index';
 import mongoose from 'mongoose';
-import { User } from '../models/User';
+import { IUser } from '../models/User';
 import bcrypt from 'bcryptjs';
 
 describe('Authentication Endpoints', () => {
@@ -17,7 +17,7 @@ describe('Authentication Endpoints', () => {
     
     // Create test user
     const hashedPassword = await bcrypt.hash(testUser.password, 10);
-    await User.create({
+    await mongoose.model<IUser>('User').create({
       email: testUser.email,
       password: hashedPassword,
     });
@@ -25,7 +25,7 @@ describe('Authentication Endpoints', () => {
 
   afterAll(async () => {
     // Clean up test data
-    await User.deleteMany({});
+    await mongoose.model<IUser>('User').deleteMany({});
     await mongoose.connection.close();
   });
 

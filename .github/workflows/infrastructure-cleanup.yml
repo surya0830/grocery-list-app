@@ -1,0 +1,77 @@
+name: Infrastructure Cleanup
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  cleanup-unused-resources:
+    name: Cleanup Unused Resources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Cleanup unused resources
+        run: |
+          # Get list of resource groups
+          resource_groups=$(az group list --query "[?tags.Environment=='Development'].name" -o tsv)
+          
+          for rg in $resource_groups; do
+            # Check if resources are unused (customize based on your needs)
+            last_activity=$(az monitor activity-log list --resource-group $rg --max-events 1 --query "[0].eventTimestamp" -o tsv)
+            if [ $(date -d "$last_activity" +%s) -lt $(date -d "7 days ago" +%s) ]; then
+              echo "Resource group $rg appears unused. Marking for cleanup..."
+              az group update --name $rg --set tags.Cleanup=true
+            fi
+          done
+
+  cost-optimization:
+    name: Cost Optimization
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Check for underutilized resources
+        run: |
+          # Check for underutilized App Service Plans
+          app_plans=$(az appservice plan list --query "[?sku.tier=='PremiumV2'].name" -o tsv)
+          
+          for plan in $app_plans; do
+            cpu_usage=$(az monitor metrics list --resource $plan --metric "CpuPercentage" --interval PT1H --aggregation "Average" --query "value[0].timeseries[0].data[0].average" -o tsv)
+            if [ $(echo "$cpu_usage < 20" | bc) -eq 1 ]; then
+              echo "App Service Plan $plan is underutilized (CPU: $cpu_usage%)"
+              # Add notification or auto-scaling adjustment
+            fi
+          done
+
+      - name: Generate cost report
+        run: |
+          # Generate cost report for the last 30 days
+          az consumption usage list --start-date $(date -d "30 days ago" +%Y-%m-%d) --end-date $(date +%Y-%m-%d) --output table
+
+  notify:
+    name: Send Notifications
+    needs: [cleanup-unused-resources, cost-optimization]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow,job,took
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always() 

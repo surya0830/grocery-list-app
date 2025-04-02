@@ -44,4 +44,22 @@ variable "aks_node_size" {
   description = "The size of the AKS nodes"
   type        = string
   default     = "Standard_DS2_v2"
+}
+
+variable "jwt_secret" {
+  description = "The JWT secret for authentication"
+  type        = string
+  sensitive   = true
+}
+
+variable "cosmos_db_name" {
+  description = "The name of the Cosmos DB account"
+  type        = string
+  default     = "grocery-app-db"
+}
+
+variable "cosmos_db_database_name" {
+  description = "The name of the Cosmos DB database"
+  type        = string
+  default     = "grocery-db"
 } 

@@ -1,70 +1,179 @@
-import { BlobServiceClient, BlockBlobClient } from '@azure/storage-blob';
-import { Buffer } from 'buffer';
+import { BlobServiceClient, ContainerClient, BlobClient } from '@azure/storage-blob';
+import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
-
-// Configure Azure Storage connection
-const AZURE_STORAGE_CONNECTION_STRING = process.env.AZURE_STORAGE_CONNECTION_STRING || '';
-const CONTAINER_NAME = process.env.AZURE_STORAGE_CONTAINER_NAME || 'pantry-images';
+import { Buffer } from 'buffer';
+import { security } from '../middleware/security';
 
 class AzureStorageService {
-  private blobServiceClient: BlobServiceClient;
-  
-  constructor() {
-    this.blobServiceClient = BlobServiceClient.fromConnectionString(AZURE_STORAGE_CONNECTION_STRING);
+  private static instance: AzureStorageService;
+  private blobServiceClient: BlobServiceClient | null = null;
+  private containerClient: ContainerClient | null = null;
+
+  private constructor() {}
+
+  static getInstance(): AzureStorageService {
+    if (!AzureStorageService.instance) {
+      AzureStorageService.instance = new AzureStorageService();
+    }
+    return AzureStorageService.instance;
   }
 
-  /**
-   * Get a block blob client
-   */
-  private getBlockBlobClient(blobName: string): BlockBlobClient {
-    const containerClient = this.blobServiceClient.getContainerClient(CONTAINER_NAME);
-    return containerClient.getBlockBlobClient(blobName);
-  }
-
-  /**
-   * Upload file to Azure Blob Storage
-   * @param uri Local file URI
-   * @param blobName Name to use for the blob
-   * @returns URL of the uploaded blob
-   */
-  async uploadFile(uri: string, blobName: string): Promise<string> {
+  async initialize(connectionString: string, containerName: string): Promise<void> {
     try {
-      // Read the file
-      const fileInfo = await FileSystem.getInfoAsync(uri);
-      if (!fileInfo.exists) {
-        throw new Error(`File does not exist at ${uri}`);
+      // Validate inputs
+      if (!security.validateInput(containerName)) {
+        throw new Error('Invalid container name');
       }
 
-      // Convert local file to blob
-      const base64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      const buffer = Buffer.from(base64, 'base64');
-      
-      // Get blob client and upload
-      const blockBlobClient = this.getBlockBlobClient(blobName);
-      await blockBlobClient.uploadData(buffer);
-      
-      return blockBlobClient.url;
+      this.blobServiceClient = new BlobServiceClient(connectionString);
+      this.containerClient = this.blobServiceClient.getContainerClient(containerName);
+
+      // Ensure container exists and is private
+      const exists = await this.containerClient.exists();
+      if (!exists) {
+        await this.containerClient.create();
+      }
     } catch (error) {
-      console.error('Error uploading file to Azure Blob Storage:', error);
+      console.error('Error initializing Azure Storage:', error);
       throw error;
     }
   }
 
   /**
-   * Delete a blob from storage
-   * @param blobName Name of the blob to delete
+   * Upload file to Azure Blob Storage with security checks
+   * @param fileUri Local file URI
+   * @param blobName Name to use for the blob
+   * @returns URL of the uploaded blob
    */
-  async deleteBlob(blobName: string): Promise<void> {
+  async uploadFile(fileUri: string, blobName: string): Promise<string> {
+    if (!this.containerClient) {
+      throw new Error('Azure Storage not initialized');
+    }
+
     try {
-      const blockBlobClient = this.getBlockBlobClient(blobName);
-      await blockBlobClient.delete();
+      // Rate limiting
+      if (!(await security.rateLimiter.canMakeRequest())) {
+        throw new Error('Rate limit exceeded');
+      }
+
+      // Validate inputs
+      if (!security.validateInput(blobName)) {
+        throw new Error('Invalid blob name');
+      }
+
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      if (!fileInfo.exists) {
+        throw new Error('File does not exist');
+      }
+
+      // Validate file
+      if (!security.validateFile(blobName, 'image/jpeg', fileInfo.size)) {
+        throw new Error('Invalid file');
+      }
+
+      const blobClient = this.containerClient.getBlobClient(blobName);
+
+      // Read the file content
+      const fileContent = await FileSystem.readAsStringAsync(fileUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // Convert base64 to buffer
+      const buffer = Buffer.from(fileContent, 'base64');
+
+      // Upload with content type and encryption
+      await blobClient.uploadData(buffer, {
+        blobHTTPHeaders: {
+          blobContentType: 'image/jpeg',
+        },
+      });
+
+      // Set metadata after upload
+      await blobClient.setMetadata({
+        uploadedAt: new Date().toISOString(),
+        source: Platform.OS,
+      });
+
+      // Generate SAS URL with short expiry
+      const sasUrl = await this.generateSasUrl(blobClient);
+      return sasUrl;
     } catch (error) {
-      console.error('Error deleting blob from Azure Storage:', error);
+      console.error('Error uploading file to Azure:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a secure SAS URL with short expiry
+   */
+  private async generateSasUrl(blobClient: BlobClient): Promise<string> {
+    const startsOn = new Date();
+    const expiresOn = new Date(startsOn);
+    expiresOn.setMinutes(startsOn.getMinutes() + security.config.sasTokenExpiry);
+
+    const sasToken = await blobClient.generateSasUrl({
+      permissions: 'r', // Read only
+      startsOn,
+      expiresOn,
+      protocol: 'https',
+    });
+
+    return sasToken;
+  }
+
+  /**
+   * Delete a blob from storage with security checks
+   */
+  async deleteFile(blobName: string): Promise<void> {
+    if (!this.containerClient) {
+      throw new Error('Azure Storage not initialized');
+    }
+
+    try {
+      // Rate limiting
+      if (!(await security.rateLimiter.canMakeRequest())) {
+        throw new Error('Rate limit exceeded');
+      }
+
+      // Validate input
+      if (!security.validateInput(blobName)) {
+        throw new Error('Invalid blob name');
+      }
+
+      const blobClient = this.containerClient.getBlobClient(blobName);
+      await blobClient.delete();
+    } catch (error) {
+      console.error('Error deleting file from Azure:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get a secure URL for a blob
+   */
+  async getFileUrl(blobName: string): Promise<string> {
+    if (!this.containerClient) {
+      throw new Error('Azure Storage not initialized');
+    }
+
+    try {
+      // Rate limiting
+      if (!(await security.rateLimiter.canMakeRequest())) {
+        throw new Error('Rate limit exceeded');
+      }
+
+      // Validate input
+      if (!security.validateInput(blobName)) {
+        throw new Error('Invalid blob name');
+      }
+
+      const blobClient = this.containerClient.getBlobClient(blobName);
+      return this.generateSasUrl(blobClient);
+    } catch (error) {
+      console.error('Error getting file URL from Azure:', error);
       throw error;
     }
   }
 }
 
-export default new AzureStorageService(); 
+export default AzureStorageService.getInstance(); 

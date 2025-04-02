@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grocery-app
+  labels:
+    app: grocery-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grocery-app
+  template:
+    metadata:
+      labels:
+        app: grocery-app
+    spec:
+      containers:
+      - name: grocery-app
+        image: groceryappregistry.azurecr.io/grocery-app:latest
+        ports:
+        - containerPort: 3000
+          name: http
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grocery-app
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 3000
+    targetPort: http
+    name: http
+  selector:
+    app: grocery-app 
