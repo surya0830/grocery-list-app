@@ -8,7 +8,7 @@ import {
   ActivityIndicator,
   Platform
 } from 'react-native';
-import { Camera } from 'expo-camera';
+import { Camera, CameraType } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { useNavigation } from '@react-navigation/native';
 import AzureStorageService from '../../services/AzureStorageService';
@@ -20,12 +20,11 @@ const PantryScanner: React.FC = () => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [detectedObjects, setDetectedObjects] = useState<string[]>([]);
-  const cameraRef = useRef<any>(null);
+  const cameraRef = useRef<Camera>(null);
   const navigation = useNavigation();
   const dispatch = useAppDispatch();
 
   useEffect(() => {
-    // Request camera permissions
     (async () => {
       const { status } = await Camera.requestCameraPermissionsAsync();
       setHasPermission(status === 'granted');
@@ -33,70 +32,64 @@ const PantryScanner: React.FC = () => {
   }, []);
 
   const takePicture = async () => {
-    if (isProcessing) return;
-
+    if (!cameraRef.current) return;
+    
     try {
       setIsProcessing(true);
-      
-      if (cameraRef.current) {
-        // Take photo
-        const photo = await cameraRef.current.takePictureAsync();
-        
-        // Resize the image to reduce upload size
-        const manipResult = await ImageManipulator.manipulateAsync(
-          photo.uri,
-          [{ resize: { width: 1000 } }],
-          { compress: 0.8, format: 'jpeg' }
-        );
-        
-        // Upload the photo
-        await uploadImageToAzure(manipResult.uri);
-        
-        // Simulate object detection
-        setTimeout(() => {
-          const mockDetectedItems = [
-            'Milk Carton',
-            'Cereal Box',
-            'Apple',
-            'Soda Can'
-          ];
-          setDetectedObjects(mockDetectedItems);
-          
-          // Send detected items to store for further processing
-          dispatch(addScannedItems(mockDetectedItems));
-        }, 1500);
-      }
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.7,
+        base64: true,
+        skipProcessing: true,
+        exif: true
+      });
+
+      // Process the image
+      const processedImage = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [{ resize: { width: 800 } }],
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      // Upload to Azure Blob Storage
+      const blobName = `pantry-scans/${uuidv4()}.jpg`;
+      await AzureStorageService.uploadFile(processedImage.uri, blobName);
+
+      // Simulate object detection (replace with actual AI service)
+      const mockDetectedItems = ['Apple', 'Banana', 'Orange'];
+      setDetectedObjects(mockDetectedItems);
+
+      // Add to pantry
+      dispatch(addScannedItems(mockDetectedItems));
+
+      Alert.alert('Success', 'Items scanned and added to pantry!');
     } catch (error) {
-      console.error('Error taking picture:', error);
-      Alert.alert('Error', 'Failed to take picture');
+      console.error('Error processing image:', error);
+      Alert.alert('Error', 'Failed to process image. Please try again.');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const uploadImageToAzure = async (uri: string) => {
-    try {
-      // Generate unique blob name
-      const blobName = `pantry_scan_${uuidv4()}.jpg`;
-      
-      // Upload to Azure Blob Storage
-      const imageUrl = await AzureStorageService.uploadFile(uri, blobName);
-      console.log('Image uploaded successfully:', imageUrl);
-      
-      return imageUrl;
-    } catch (error) {
-      console.error('Error uploading image to Azure:', error);
-      Alert.alert('Upload Error', 'Failed to upload image to cloud storage');
-      throw error;
-    }
-  };
-
   if (hasPermission === null) {
-    return <View style={styles.container}><Text>Requesting camera permission...</Text></View>;
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#0000ff" />
+      </View>
+    );
   }
-  
+
   if (hasPermission === false) {
-    return <View style={styles.container}><Text>No access to camera</Text></View>;
+    return (
+      <View style={styles.container}>
+        <Text style={styles.text}>No access to camera</Text>
+        <TouchableOpacity 
+          style={styles.button}
+          onPress={() => navigation.goBack()}
+        >
+          <Text style={styles.buttonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
   }
 
   return (
@@ -104,33 +97,29 @@ const PantryScanner: React.FC = () => {
       <Camera 
         ref={cameraRef}
         style={styles.camera}
-        type="back"
+        type={CameraType.back}
       />
       
-      <View style={styles.overlay}>
-        {detectedObjects.length > 0 && (
-          <View style={styles.detectedItemsContainer}>
-            <Text style={styles.detectedItemsTitle}>Detected Items:</Text>
-            {detectedObjects.map((item, index) => (
-              <Text key={index} style={styles.detectedItem}>{item}</Text>
-            ))}
-          </View>
-        )}
-        
-        <View style={styles.controls}>
-          <TouchableOpacity
-            style={styles.captureButton}
-            onPress={takePicture}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <View style={styles.captureButtonInner} />
-            )}
-          </TouchableOpacity>
-        </View>
+      <View style={styles.controls}>
+        <TouchableOpacity 
+          style={[styles.button, isProcessing && styles.buttonDisabled]}
+          onPress={takePicture}
+          disabled={isProcessing}
+        >
+          <Text style={styles.buttonText}>
+            {isProcessing ? 'Processing...' : 'Take Picture'}
+          </Text>
+        </TouchableOpacity>
       </View>
+
+      {detectedObjects.length > 0 && (
+        <View style={styles.results}>
+          <Text style={styles.resultsTitle}>Detected Items:</Text>
+          {detectedObjects.map((item, index) => (
+            <Text key={index} style={styles.resultItem}>{item}</Text>
+          ))}
+        </View>
+      )}
     </View>
   );
 };
@@ -143,43 +132,53 @@ const styles = StyleSheet.create({
   camera: {
     flex: 1,
   },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'flex-end',
-    padding: 20,
-  },
   controls: {
+    position: 'absolute',
+    bottom: 20,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
     justifyContent: 'center',
-    marginBottom: 30,
-  },
-  captureButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-    justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
   },
-  captureButtonInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#fff',
+  button: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginHorizontal: 10,
   },
-  detectedItemsContainer: {
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 20,
+  buttonDisabled: {
+    backgroundColor: '#999',
   },
-  detectedItemsTitle: {
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  text: {
     color: '#fff',
     fontSize: 18,
-    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  results: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    padding: 15,
+    borderRadius: 8,
+  },
+  resultsTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
     marginBottom: 10,
   },
-  detectedItem: {
+  resultItem: {
     color: '#fff',
     fontSize: 16,
     marginBottom: 5,
