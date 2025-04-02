@@ -1,0 +1,170 @@
+name: CD
+
+on:
+  workflow_dispatch:  # Manual trigger only for development
+  schedule:
+    - cron: '0 8 * * 1-5'  # Start environment at 8 AM on weekdays
+    - cron: '0 18 * * 1-5' # Stop environment at 6 PM on weekdays
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Check Schedule
+      id: schedule
+      run: |
+        HOUR=$(TZ=UTC date +%H)
+        if [[ $HOUR == "08" ]]; then
+          echo "action=start" >> $GITHUB_OUTPUT
+        elif [[ $HOUR == "18" ]]; then
+          echo "action=stop" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Start Environment
+      if: github.event_name == 'workflow_dispatch' || steps.schedule.outputs.action == 'start'
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Start with minimal resources
+          az appservice plan update \
+            --name ${{ secrets.AZURE_APP_SERVICE_PLAN }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --sku B1 \
+            --min-instances 1 \
+            --max-instances 1
+
+          # Start the web app
+          az webapp start \
+            --name ${{ secrets.AZURE_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }}
+
+          # Enable Application Insights with minimal sampling
+          az monitor app-insights component update \
+            --app ${{ secrets.AZURE_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --sampling-percentage 20
+
+    - name: Stop Environment
+      if: steps.schedule.outputs.action == 'stop'
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Stop the web app
+          az webapp stop \
+            --name ${{ secrets.AZURE_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }}
+
+          # Scale down to zero instances
+          az appservice plan update \
+            --name ${{ secrets.AZURE_APP_SERVICE_PLAN }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --sku B1 \
+            --number-of-workers 0
+
+    - name: Set up cost controls
+      if: github.event_name == 'workflow_dispatch' || steps.schedule.outputs.action == 'start'
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Set up daily budget alert
+          az monitor metrics alert create \
+            --name "DailyBudgetAlert" \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --scopes "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --condition "total > 10" \
+            --window-size 1d \
+            --evaluation-frequency 1d \
+            --action webhook ${{ secrets.AZURE_ALERT_WEBHOOK_URL }}
+
+          # Enable auto-shutdown after 1 hour of inactivity
+          az monitor autoscale create \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name "dev-autoscale" \
+            --min-count 0 \
+            --max-count 1 \
+            --count 1 \
+            --resource ${{ secrets.AZURE_APP_SERVICE_PLAN }} \
+            --rules '[{"metricTrigger":{"metricName":"CpuPercentage","metricResourceUri":"","timeGrain":"PT1M","statistic":"Average","timeWindow":"PT1H","timeAggregation":"Average","operator":"LessThan","threshold":1},"scaleAction":{"direction":"Decrease","type":"ChangeCount","value":"0","cooldown":"PT5M"}}]'
+
+    - name: Download build artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: build
+        path: build/
+
+    - name: Deploy to Azure App Service
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ secrets.AZURE_APP_NAME }}
+        package: build/
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+
+    - name: Configure App Service
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Set up auto-scaling rules for cost optimization
+          az appservice plan update --name ${{ secrets.AZURE_APP_SERVICE_PLAN }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --min-instances 1 \
+            --max-instances 3 \
+            --sku B1
+
+          # Configure auto-shutdown for non-production environments
+          if [ "${{ secrets.AZURE_ENVIRONMENT }}" != "production" ]; then
+            az monitor activity-log alert create \
+              --name "AppService-AutoShutdown" \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --condition "category == 'Administrative' and operationName == 'Microsoft.Web/sites/stop'" \
+              --action webhook ${{ secrets.AZURE_ALERT_WEBHOOK_URL }}
+          fi
+
+    - name: Configure Application Insights
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Enable Application Insights sampling for cost optimization
+          az monitor app-insights component update \
+            --app ${{ secrets.AZURE_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --sampling-rate 50
+
+    - name: Set up monitoring alerts
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Create cost alerts
+          az monitor metrics alert create \
+            --name "AppService-CostAlert" \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --scopes "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --condition "total > 100" \
+            --window-size 1d \
+            --evaluation-frequency 1d \
+            --action webhook ${{ secrets.AZURE_ALERT_WEBHOOK_URL }}
+
+    - name: Configure backup
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          # Set up automated backups
+          az webapp config backup update \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --webapp-name ${{ secrets.AZURE_APP_NAME }} \
+            --frequency 1d \
+            --retention 7d \
+            --storage-account ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+
+    - name: Health check
+      run: |
+        echo "Waiting for deployment to complete..."
+        sleep 30
+        curl -f https://${{ secrets.AZURE_APP_NAME }}.azurewebsites.net/health || exit 1 
